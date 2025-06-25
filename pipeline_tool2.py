@@ -837,11 +837,47 @@ def filter_wildcard(args):
     outdir = prepare_output(args.output_dir)
     outfile = outdir / (args.output or 'subs_filtered.txt')
     print(Fore.GREEN + f"[+] Filtering wildcards on {args.domain}...\n")
-    cmd = f"./wild_batch_scanner.sh {args.domain} {args.wordlist} > {outfile}"
-    if run(cmd):
-        print(Fore.GREEN + f"[✓] Filtered subs saved to {outfile}\n")
+
+    # Check if the subs_file exists and is readable
+    try:
+        with open(args.subs_file, 'r') as f:
+            subdomains = [line.strip() for line in f if line.strip()]
+        print(Fore.CYAN + f"Loaded {len(subdomains)} subdomains from {args.subs_file}")
+    except FileNotFoundError:
+        print(Fore.RED + f"[✗] Subdomains file not found: {args.subs_file}")
+        return
+
+    # Detect wildcard DNS
+    wildcard_ip = detect_wildcard(args.domain)
+    if wildcard_ip:
+        print(Fore.YELLOW + f"Detected wildcard DNS IP: {wildcard_ip}")
     else:
-        print(Fore.RED + f"[✗] Failed to filter wildcards\n")
+        print(Fore.CYAN + "No wildcard DNS detected.")
+        # If no wildcard detected, just copy the input to output
+        with open(outfile, 'w') as f:
+            for sub in subdomains:
+                f.write(f"{sub}\n")
+        print(Fore.GREEN + f"[✓] No wildcard DNS detected. All subdomains saved to {outfile}\n")
+        return
+
+    # Filter out subdomains that resolve to the wildcard IP
+    filtered_subdomains = []
+    for subdomain in subdomains:
+        ip = resolve_domain(subdomain)
+        if ip and ip != wildcard_ip:
+            filtered_subdomains.append(subdomain)
+        else:
+            print(Fore.RED + f"Filtered out wildcard: {subdomain}")
+
+    # Write filtered subdomains to the output file
+    with open(outfile, 'w') as f:
+        for sub in filtered_subdomains:
+            f.write(f"{sub}\n")
+
+    print(Fore.GREEN + f"[✓] Filtered subdomains saved to {outfile}\n")
+    print(Fore.GREEN + f"Filtered out {len(subdomains) - len(filtered_subdomains)} wildcard entries")
+    print(Fore.GREEN + f"Remaining subdomains: {len(filtered_subdomains)}")
+
 def subscan(args):
     outdir = prepare_output(args.output_dir)
     outfile = outdir / (args.output or 'subsubs.txt')
@@ -891,31 +927,100 @@ def subscan(args):
     print(Fore.GREEN + f"\n[✓] Total sub-subdomains found: {len(all_found)}")
     print(Fore.GREEN + f"[✓] Sub-subdomains saved to {outfile}\n")
 def wordscan(args):
-    outdir = prepare_output(args.output_dir)
-    print(Fore.GREEN + f"[+] Wordlist scan on {args.subdomain}...\n")
-    # Check if the wordlist scanner exists
-    if not os.path.exists('wildcard_wordlist_scanner.py'):
-        print(Fore.RED + "[✗] wildcard_wordlist_scanner.py not found!")
-        print(Fore.YELLOW + "Attempting alternative scan method...")
-        # Alternative: use our built-in scanner
-        wordlist_dir = Path(args.wordlist_dir)
-        if wordlist_dir.exists():
-            wordlist_files = list(wordlist_dir.glob("*.txt"))
-            if wordlist_files:
-                found = scan_subsubdomains(args.subdomain, wordlist_files, DEFAULT_THREADS)
-                print(Fore.GREEN + f"[✓] Found {len(found)} subdomains")
-                for sub in sorted(found):
-                    print(Fore.CYAN + f"  {sub}")
-            else:
-                print(Fore.RED + f"[✗] No wordlist files found in {args.wordlist_dir}")
-        else:
-            print(Fore.RED + f"[✗] Wordlist directory not found: {args.wordlist_dir}")
+    # Prepare directory and output file path
+    outdir = Path(args.output_dir) if args.output_dir else Path('outputs')
+    outdir.mkdir(parents=True, exist_ok=True)
+    outfile = outdir / (args.output or 'web_paths.txt')
+
+    # Check if the subdomains file exists and is readable
+    try:
+        with open(args.subdomain, 'r') as f:
+            subdomains = [line.strip() for line in f if line.strip()]
+        print(Fore.CYAN + f"Loaded {len(subdomains)} subdomains from {args.subdomain}")
+    except FileNotFoundError:
+        print(Fore.RED + f"[✗] Subdomains file not found: {args.subdomain}")
         return
-    p = subprocess.Popen(
-        ['python3', 'wildcard_wordlist_scanner.py'], stdin=subprocess.PIPE, text=True
-    )
-    p.communicate(f"{args.subdomain}\n{args.wordlist_dir}\n")
-    print(Fore.GREEN + "[✓] Wordlist scan complete.\n")
+
+    # Ensure the wordlist directory exists and is accessible
+    wordlist_dir = Path(args.wordlist_dir)
+    if not wordlist_dir.exists():
+        print(Fore.RED + f"[✗] Wordlist directory not found: {args.wordlist_dir}")
+        return
+
+    # Get all wordlist files from the directory
+    wordlist_files = list(wordlist_dir.glob("*.txt"))
+    if not wordlist_files:
+        print(Fore.RED + f"[✗] No .txt wordlist files found in {args.wordlist_dir}")
+        return
+
+    print(Fore.CYAN + f"Found {len(wordlist_files)} wordlist files")
+    for wf in wordlist_files:
+        print(Fore.CYAN + f"  - {wf.name}")
+
+    all_found_paths = []
+
+    def scan_paths(subdomain, wordlist_files):
+        """Scan for web paths using wordlists on a given subdomain"""
+        found_paths = set()
+        def check_path(path, base_url):
+            test_url = f"https://{base_url}{path}"
+            try:
+                response = requests.get(test_url, timeout=5, allow_redirects=False)
+                if response.status_code not in [403, 404, 401]:
+                    return test_url
+            except requests.RequestException:
+                try:
+                    test_url = f"http://{base_url}{path}"
+                    response = requests.get(test_url, timeout=5, allow_redirects=False)
+                    if response.status_code not in [403, 404, 401]:
+                        return test_url
+                except requests.RequestException:
+                    pass
+            return None
+
+        # Read wordlist files and collect paths
+        total_paths = set()
+        for wordlist_file in wordlist_files:
+            try:
+                with open(wordlist_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    paths = [line.strip() for line in f if line.strip()]
+                    for path in paths:
+                        total_paths.add(path)
+                print(Fore.CYAN + f"Loaded {len(paths)} paths from {wordlist_file}")
+            except Exception as e:
+                print(Fore.RED + f"Error reading {wordlist_file}: {e}")
+
+        # Perform the scan
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(check_path, path, subdomain): path for path in total_paths}
+            completed = 0
+            for future in as_completed(futures):
+                completed += 1
+                if completed % 50 == 0:
+                    print(Fore.YELLOW + f"Progress: {completed}/{len(total_paths)} checked")
+                result = future.result()
+                if result:
+                    found_paths.add(result)
+
+        return found_paths
+
+    # Scan each subdomain
+    for subdomain in subdomains:
+        print(Fore.YELLOW + f"\n[*] Scanning paths for {subdomain}")
+        found_paths = scan_paths(subdomain, wordlist_files)
+        all_found_paths.extend(found_paths)
+        print(Fore.GREEN + f"Found {len(found_paths)} valid paths for {subdomain}")
+
+    # Save the results to the specified output file
+    try:
+        with open(outfile, 'w') as f:
+            for path in all_found_paths:
+                f.write(f"{path}\n")
+        print(Fore.GREEN + f"[✓] Found {len(all_found_paths)} paths in total")
+        print(Fore.GREEN + f"[✓] Results saved to {outfile}\n")
+    except Exception as e:
+        print(Fore.RED + f"[✗] Failed to write results to file: {e}")
+
 def identify_403(args):
     outdir = prepare_output(args.output_dir)
     outfile = outdir / (args.output or 'endpoints_403.txt')
@@ -1029,51 +1134,62 @@ def main():
     parser.add_argument('--output-dir', '-O', default='outputs', help='Directory for all output files')
     parser.add_argument('--version', action='version', version='Cerberus 1.0.1')
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
+
     # enum
-    p = subparsers.add_parser('enum', help='Enumerate subdomains')
-    p.add_argument('domain', help='Base domain (e.g., example.com)')
-    p.add_argument('-o', '--output', help='Filename for subdomains')
-    p.set_defaults(func=enum_subdomains)
+    p_enum = subparsers.add_parser('enum', help='Enumerate subdomains')
+    p_enum.add_argument('domain', help='Base domain (e.g., example.com)')
+    p_enum.add_argument('-o', '--output', help='Filename for subdomains')
+    p_enum.set_defaults(func=enum_subdomains)
+
     # filter
-    p = subparsers.add_parser('filter', help='Filter wildcard DNS from subs')
-    p.add_argument('domain', help='Base domain')
-    p.add_argument('wordlist', help='Wordlist (txt)')
-    p.add_argument('subs_file', help='Raw subdomains file')
-    p.add_argument('-o', '--output', help='Filename for filtered subs')
-    p.set_defaults(func=filter_wildcard)
+    p_filter = subparsers.add_parser('filter', help='Filter wildcard DNS from subs')
+    p_filter.add_argument('domain', help='Base domain')
+    p_filter.add_argument('wordlist', help='Wordlist (txt)')
+    p_filter.add_argument('subs_file', help='Raw subdomains file')
+    p_filter.add_argument('-o', '--output', help='Filename for filtered subs')
+    p_filter.set_defaults(func=filter_wildcard)
+
     # subscan
-    p = subparsers.add_parser('subscan', help='Find sub-subdomains')
-    p.add_argument('subs_file', help='Base subdomains file')
-    p.add_argument('wordlist_dir', help='Dir of .txt wordlists')
-    p.add_argument('-t', '--threads', type=int, default=DEFAULT_THREADS, help='Max DNS threads')
-    p.add_argument('-o', '--output', help='Filename for sub-subdomains')
-    p.set_defaults(func=subscan)
+    p_subscan = subparsers.add_parser('subscan', help='Find sub-subdomains')
+    p_subscan.add_argument('subs_file', help='Base subdomains file')
+    p_subscan.add_argument('wordlist_dir', help='Dir of .txt wordlists')
+    p_subscan.add_argument('-t', '--threads', type=int, default=DEFAULT_THREADS, help='Max DNS threads')
+    p_subscan.add_argument('-o', '--output', help='Filename for sub-subdomains')
+    p_subscan.set_defaults(func=subscan)
+
     # wordscan
-    p = subparsers.add_parser('wordscan', help='Wordlist scan on subdomain')
-    p.add_argument('subdomain', help='Single subdomain')
-    p.add_argument('wordlist_dir', help='Dir of .txt wordlists')
-    p.set_defaults(func=wordscan)
+    p_wordscan = subparsers.add_parser('wordscan', help='Wordlist scan on subdomain')
+    p_wordscan.add_argument('subdomain', help='Single subdomain or file with subdomains')
+    p_wordscan.add_argument('wordlist_dir', help='Dir of .txt wordlists')
+    p_wordscan.add_argument('-o', '--output', help='Filename for paths list')  # Added the -o option here
+    p_wordscan.set_defaults(func=wordscan)
+
     # identify403
-    p = subparsers.add_parser('identify403', help='Discover 403 endpoints')
-    p.add_argument('subdomain', help='Single subdomain or file with subdomains')
-    p.add_argument('wordlist_dir', help='Dir of endpoint wordlists')
-    p.add_argument('-o', '--output', help='Filename for endpoints list')
-    p.set_defaults(func=identify_403)
+    p_identify403 = subparsers.add_parser('identify403', help='Discover 403 endpoints')
+    p_identify403.add_argument('subdomain', help='Single subdomain or file with subdomains')
+    p_identify403.add_argument('wordlist_dir', help='Dir of endpoint wordlists')
+    p_identify403.add_argument('-o', '--output', help='Filename for endpoints list')
+    p_identify403.set_defaults(func=identify_403)
+
     # bypass
-    p = subparsers.add_parser('bypass', help='Test CORS/bypass on 403s')
-    p.add_argument('endpoints_file', help='File listing 403 endpoints')
-    p.add_argument('-o', '--output', help='Filename for bypass results')
-    p.set_defaults(func=bypass_test)
+    p_bypass = subparsers.add_parser('bypass', help='Test CORS/bypass on 403s')
+    p_bypass.add_argument('endpoints_file', help='File listing 403 endpoints')
+    p_bypass.add_argument('-o', '--output', help='Filename for bypass results')
+    p_bypass.set_defaults(func=bypass_test)
+
     # adminfuzz
-    p = subparsers.add_parser('adminfuzz', help='Fuzz admin paths')
-    p.add_argument('subdomain', help='Single subdomain or file with subdomains')
-    p.add_argument('wordlist_dir', help='Dir of .txt wordlists')
-    p.add_argument('-o', '--output', help='Filename for admin fuzz results')
-    p.set_defaults(func=admin_fuzz)
+    p_adminfuzz = subparsers.add_parser('adminfuzz', help='Fuzz admin paths')
+    p_adminfuzz.add_argument('subdomain', help='Single subdomain or file with subdomains')
+    p_adminfuzz.add_argument('wordlist_dir', help='Dir of .txt wordlists')
+    p_adminfuzz.add_argument('-o', '--output', help='Filename for admin fuzz results')
+    p_adminfuzz.set_defaults(func=admin_fuzz)
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
         sys.exit(1)
     args.func(args)
+
 if __name__ == '__main__':
     main()
+
