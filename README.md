@@ -30,5 +30,5 @@
 Clone the repo and navigate to it:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/cerberus.git
+git clone https://github.com/m0hamed777/cerberus.git
 cd cerberus
