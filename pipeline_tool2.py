@@ -640,7 +640,7 @@ def bypass_403_endpoints(endpoints_file, threads=5):
                 data=data,
                 allow_redirects=False,
                 timeout=10,
-                verify=False
+                verify=True
             )
             
             # Consider various success indicators
