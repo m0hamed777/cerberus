@@ -256,16 +256,23 @@ def bypass_403_endpoints(endpoints_file, threads=5):
     session.mount("https://", adapter)
 
     # Fetch initial status code for each endpoint
+  # Fetch initial status code for each endpoint
     endpoints_with_status = []
     for endpoint in endpoints:
         try:
             response = session.get(endpoint, timeout=5, allow_redirects=False)
             status_code = response.status_code
+            
+            # ADD THIS CHECK: If status is 404, skip this endpoint
+            if status_code in [200,404,302,301]:
+                print(Fore.BLUE + f"Skipping endpoint: {endpoint} [404 Not Found]")
+                continue
+
             endpoints_with_status.append((endpoint, status_code))
             print(Fore.YELLOW + f"Testing endpoint: {endpoint} [{status_code}]")
         except Exception as e:
             print(Fore.RED + f"Failed to fetch status for {endpoint}: {e}")
-            endpoints_with_status.append((endpoint, 'Unknown'))
+            endpoints_with_status.append((endpoint, 'Unknown')) 
 
     # User agents for rotation
     user_agents = [
@@ -645,7 +652,7 @@ def bypass_403_endpoints(endpoints_file, threads=5):
             
             # Consider various success indicators
             is_success = (
-                response.status_code not in [403, 404, 401] and
+                response.status_code not in [404, 403, 401, 301, 302, 400] and
                 response.status_code < 500 and
                 'forbidden' not in response.text.lower()[:200] and
                 'access denied' not in response.text.lower()[:200] and
