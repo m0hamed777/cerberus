@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (c) 2025 [m0hamed777]
+# This software is released under the MIT License.
+# https://opensource.org/licenses/MIT
 """
 Cerberus: Gateway Guardian Recon Pipeline Tool
 Version: 1.0.1
