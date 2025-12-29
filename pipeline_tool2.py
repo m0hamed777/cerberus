@@ -637,7 +637,7 @@ def bypass_403_endpoints(endpoints_file, threads=5):
         
         try:
             # Proper delay implementation - random delay between 0.1 to 0.5 seconds
-            delay = random.uniform(0.1, 0.4)
+            delay = random.uniform(0.05, 0.4)
             time.sleep(delay)
             
             response = session.request(
@@ -652,7 +652,7 @@ def bypass_403_endpoints(endpoints_file, threads=5):
             
             # Consider various success indicators
             is_success = (
-                response.status_code not in [404, 403, 401, 301, 302, 400] and
+                response.status_code not in [404, 403, 401, 301, 308, 400, 405, 429] and
                 response.status_code < 500 and
                 'forbidden' not in response.text.lower()[:200] and
                 'access denied' not in response.text.lower()[:200] and
